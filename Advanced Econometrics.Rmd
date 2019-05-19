@@ -1,0 +1,455 @@
+---
+title: "Advanced Econometrics"
+author: "Parviz Hajizada"
+date: "17 may 2019"
+output: html_document
+---
+
+# Introduction
+The aim of this project is to explain city-pair air traffic demand. It is found that frequency of flights and fare are the most significant variables and usage of fixed effects is crucial. OLS, FE, PPML, NBPML, GAUSSIAN estimators are used to predict the demand. R2, MAPE, MAE, MedianAE, MedianAPE, RMSE are used as measures of prediction accuracy. The datasets used covers airports from 174 countries over the time period of 2002-2017.
+
+### Load necessary packages
+```{r warning = FALSE, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(corrplot)
+library(lfe)
+library(FENmlm)
+library(MLmetrics)
+library(reshape)
+library(stargazer)
+library(moments)
+library(purrr)
+```
+
+### Import data
+```{r}
+market <- read.csv2("market.csv")
+dim(market)
+```
+
+# Exploratory Data Analysis
+### Descriptive statistics
+```{r}
+sapply(market, class)
+```
+
+```{r}
+head(market)
+```
+
+```{r}
+any(is.na(market))
+```
+
+### Change class of variables
+```{r}
+# Convert into factors (year converted into factor intentionally)
+facts <- c("year", "origin", "destination", "iso3_o", "iso3_d", "domestic", 
+           "intercontinental", "dist200", "rta", "cu", "fta")
+market[,facts] <- lapply(market[,facts], as.factor)
+
+# COnvert into integers
+nums <- c("passengers", "revenue_usd", "capacity", "frequency",
+          "distance", "POP_o", "POP_d", "GDPCAP_o", "GDPCAP_d")
+market[,nums] <- lapply(market[,nums], as.integer)
+```
+
+#### Number of unique levels of categorical variables
+```{r}
+market %>% 
+  select_if(is.factor) %>%
+  map_dfr(function(x) length(unique(x)))
+```
+
+Variables origin and destination have both around 1000 levels. When the number of levels are so high, it is either impossible or even if it is possible then very time and memory consuming to run functions like lm, plm, glm. Instead functions from lfe and FENmlm packages are used in the project. lfe package for OLS with fixed effects, FENmlm package for PPML, NBPML, GAUSSIAN with fixed effects. 
+
+#### How total number of passengers changed over years
+```{r}
+market %>%
+  group_by(year) %>%
+  summarise(total_passengers = sum(passengers)) %>%
+  ggplot(aes(x = year, y = total_passengers)) +
+  geom_col()
+```
+
+It can be seen that number of passengers has an upward trend over the years. 
+
+#### How total revenue changed over years
+```{r}
+market %>%
+  group_by(year) %>%
+  summarise(total_revenue = sum(as.numeric(revenue_usd))) %>%
+  ggplot(aes(x = year, y = total_revenue)) +
+  geom_col()
+```
+
+Revenue does not have such a clear trend. Revenues droped during 2009 relative to 2008 probably because of financial crisis and then rises to very high levels during 2012-2014 because of high oil prices and later it drops with falling oil prices. A better representation of revenue change can be shown by average fare which is computed as total_revenue / total_passengers.
+
+#### How average fair changed over years
+```{r}
+market %>%
+  group_by(year) %>%
+  summarise(avg_fare = mean(revenue_usd/ passengers)) %>%
+  ggplot(aes(x = year, y = avg_fare)) +
+  geom_col()
+```
+
+We can see that during 2009-2010 and 2015-2017 periods avg_fare are pretty low because of financial crisis and oil price 'crisis' respectively.
+
+#### How frequency of flights impact number of passengers
+```{r}
+market %>%
+  ggplot(aes(x = log(frequency), y = log(passengers))) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+```
+
+Just as expected, rise in frequency of flights causes number of passengers to rise. It is done in log scale because the trend is not recognizable in original scale.
+
+#### Relationship between distance and passengers
+```{r}
+market %>%
+  ggplot(aes(x = log(distance), y = log(passengers))) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+```
+
+Graph indicates positive relationship between log of distance and log of passengers. It is against literature of gravity where the relationship found to be negative. I cannot explain this counterintuitive finding but I found it important to include here.
+
+#### Impact of average fare per km on passengers
+```{r}
+market %>%
+  mutate(avg_fare_per_km = (revenue_usd/ passengers) / distance) %>%
+  ggplot(aes(x = log(avg_fare_per_km), y = log(passengers))) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+```
+
+Negative relationship as expected. As the average fare per km increases people are less likely to travel.
+
+
+#### GDP of origin country against passengers
+```{r}
+market %>%
+  ggplot(aes(x = log(GDPCAP_o), y = log(passengers))) +
+  geom_point() + 
+  geom_smooth(method = "lm")
+```
+
+It can be seen that increasing GDP is linked with higher number of passengers which is quite intuitive. The richer the nation, the easier to afford to travel.
+
+#### Average fare per km over time for short and long distance trips
+```{r}
+market %>%
+  group_by(year, dist200) %>%
+  summarise(avg_fare_per_km = sum((passengers / revenue_usd) / distance)) %>%  
+  ggplot(aes(x = year, y = avg_fare_per_km, fill = dist200)) +
+  geom_col(position = "dodge")
+``` 
+
+dist200 == 1 means distance < 200. It is done becuase in case of short distance there are other means of transportations (i.e car, bus, train) that are substitutes to air travel. Basically more competition for short distance. Just as we would expect, avg_revenue_per_km is lower for short distance travel. In other words, those travels are carried out under low margins. The difference of avg_fare_per_km between short and long distance is also partially because of fixed costs of operating a flight. To account for distance difference between short and long distance flights we use avg_fare_per_km intentionally.
+
+#### How number of passengers differs by year and whether the flight is domestic 
+```{r}
+market %>%
+  group_by(year, domestic) %>%
+  summarise(total_passengers = sum(passengers)) %>%  
+  ggplot(aes(x = year, y = total_passengers, fill = domestic)) +
+  geom_col(position = "dodge")
+```
+
+Turns out most of the flights are not domestic and ratio of domestic to non domestic is pretty stable over time. domestic == 1 when the flight is domestic.
+
+
+#### How number of passengers differs by year and whether the flight is intercontinental
+```{r}
+market %>%
+  group_by(year, intercontinental) %>%
+  summarise(total_passengers = sum(passengers)) %>%  
+  ggplot(aes(x = year, y = total_passengers, fill = intercontinental)) +
+  geom_col(position = "dodge")
+```
+
+Looks like number of intercontinental and non intercontinental flights are similar  over year. There is only a little difference; a bit less intercontinental flights. intercontinental == 1 when the flight is intercontinental.
+
+
+### Feature engineering
+Let's create variables that was found to be significant during EDA  
+
+```{r}
+# Create average fare per km feature
+market <- market %>%
+  mutate(avg_fare_per_km = (revenue_usd/ passengers) / distance) 
+
+# Add the feature to numeric features list
+nums <- c("passengers", "revenue_usd", "capacity", "frequency",
+          "distance", "POP_o", "POP_d", "GDPCAP_o", "GDPCAP_d", "avg_fare_per_km")
+```
+
+### Correlations
+```{r}
+# Calculate pairwise correlation and sort it in ascending order
+cor(market$passengers, market[nums], use="pairwise.complete.obs") %>% 
+  as.data.frame(row.names = 'Correlation') %>% 
+  sort() %>% 
+  t()
+  
+
+# Correlation plot
+corrplot(cor(market[nums]), type="upper", order="hclust", 
+         col=brewer.pal(n=8, name="RdBu"))
+```
+
+# Model estimation
+#### OLS - Ordinary Least Squares
+```{r}
+OLS <- lm(data = market, log(passengers) ~ 
+            # numerical variables
+            log(avg_fare_per_km) + log(frequency) + log(GDPCAP_o) + 
+            log(GDPCAP_d) + log(POP_o) + log(POP_d) + log(distance) + 
+            # categorical variables
+            rta + cu + domestic + intercontinental + dist200)
+            # no fixed effects
+```
+
+#### FE - Ordinary Least Squares with Fixed Effects
+```{r}
+FE <- felm(data = market, log(passengers) ~ 
+              # numerical variables 
+              log(avg_fare_per_km) + log(frequency) + log(GDPCAP_o) + 
+              log(GDPCAP_d) + log(POP_o) + log(POP_d) + log(distance) +
+              # categorical variables
+              rta + cu + domestic + intercontinental + dist200
+             |
+              # fixed effects
+              year + origin + destination)
+```
+
+
+#### PPML - Poisson Pseudo Maximum Likelihood with Fixed Effects
+```{r}
+PPML <- femlm(passengers ~ 
+                # numerical variables
+                log(avg_fare_per_km) + log(frequency) + log(GDPCAP_o) +
+                log(GDPCAP_d) + log(POP_o) + log(POP_d) + log(distance) + 
+                # categorical variables
+                rta + cu + domestic + intercontinental + dist200
+               |
+                # fixed effects
+                year + origin + destination, 
+                data = market,
+                family = "poisson")
+```
+
+#### NBPML - Negative Binomial Pseudo Maximum Likelihood with Fixed Effects
+```{r}
+NBPML <- femlm(passengers ~ 
+                 # numerical variables
+                 log(avg_fare_per_km) + log(frequency) + log(GDPCAP_o) +
+                 log(GDPCAP_d) + log(POP_o) + log(POP_d) + log(distance) + 
+                 # categorical variables
+                 rta + cu + domestic + intercontinental + dist200                 
+                |
+                 # fixed effects
+                 year + origin + destination,
+                 data = market,
+                 family = "negbin")
+```
+
+#### Gaussian - Gaussian with Fixed Effects
+```{r}
+GAUSSIAN <- femlm(passengers ~ 
+                    # numerical variables
+                    log(avg_fare_per_km) + log(frequency) + log(GDPCAP_o) +
+                    log(GDPCAP_d) + log(POP_o) + log(POP_d) + log(distance) + 
+                    # categorical variables
+                    rta + cu + domestic + intercontinental + dist200                   
+                   |  
+                    # fixed effects
+                    year + origin + destination, 
+                    data = market,
+                    family = "gaussian")
+```
+
+# Comparison of PPML, NBPML and GAUSSIAN
+```{r}
+res2table(PPML, NBPML, GAUSSIAN,                   
+          se = "twoway", 
+          subtitles = c("PPML", "NBPML", "GAUSSIAN"))
+```
+
+# Comparison of OLS and FE
+```{r message = FALSE, warning = FALSE}
+stargazer(OLS, FE,
+          type = "text")
+```
+
+
+# Error Measures
+#### MAPE - Mean Absolute Percentage Error
+```{r}
+MAPE_OLS <- MAPE(y_pred = exp(OLS$fitted.values), y_true= market$passengers)
+MAPE_FE <- MAPE(y_pred = exp(FE$fitted.values), y_true= market$passengers)
+MAPE_PPML <- MAPE(y_pred = PPML$fitted.values, y_true= market$passengers)
+MAPE_NBPML <- MAPE(y_pred = NBPML$fitted.values, y_true= market$passengers)
+MAPE_GAUSSIAN <- MAPE(y_pred = GAUSSIAN$fitted.values, y_true= market$passengers)
+``` 
+
+#### MedianAPE - Median Absolute Percentage Error
+```{r}
+MedianAPE_OLS <- MedianAPE(y_pred = exp(OLS$fitted.values), y_true= market$passengers)
+MedianAPE_FE <- MedianAPE(y_pred = exp(FE$fitted.values), y_true= market$passengers)
+MedianAPE_PPML <- MedianAPE(y_pred = PPML$fitted.values, y_true= market$passengers)
+MedianAPE_NBPML <- MedianAPE(y_pred = NBPML$fitted.values, y_true= market$passengers)
+MedianAPE_GAUSSIAN <- MedianAPE(y_pred = GAUSSIAN$fitted.values, y_true= market$passengers)
+```
+
+
+#### MAE - Mean Absolute Error
+```{r}
+MAE_OLS <- MAE(y_pred = exp(OLS$fitted.values), y_true= market$passengers)
+MAE_FE <- MAE(y_pred = exp(FE$fitted.values), y_true= market$passengers)
+MAE_PPML <- MAE(y_pred = PPML$fitted.values, y_true= market$passengers)
+MAE_NBPML <- MAE(y_pred = NBPML$fitted.values, y_true= market$passengers)
+MAE_GAUSSIAN <- MAE(y_pred = GAUSSIAN$fitted.values, y_true= market$passengers)
+```
+
+
+#### MedianAE - Median Absolute Error
+```{r}
+MedianAE_OLS <- MedianAE(y_pred = exp(OLS$fitted.values), y_true= market$passengers)
+MedianAE_FE <- MedianAE(y_pred = exp(FE$fitted.values), y_true= market$passengers)
+MedianAE_PPML <- MedianAE(y_pred = PPML$fitted.values, y_true= market$passengers)
+MedianAE_NBPML <- MedianAE(y_pred = NBPML$fitted.values, y_true= market$passengers)
+MedianAE_GAUSSIAN <- MedianAE(y_pred = GAUSSIAN$fitted.values, y_true= market$passengers)
+```
+
+
+#### RMSE - Root Mean Squared Error
+```{r}
+RMSE_OLS <- RMSE(y_pred = exp(OLS$fitted.values), y_true= market$passengers)
+RMSE_FE <- RMSE(y_pred = exp(FE$fitted.values), y_true= market$passengers)
+RMSE_PPML <- RMSE(y_pred = PPML$fitted.values, y_true= market$passengers)
+RMSE_NBPML <- RMSE(y_pred = NBPML$fitted.values, y_true= market$passengers)
+RMSE_GAUSSIAN <- RMSE(y_pred = GAUSSIAN$fitted.values, y_true= market$passengers)
+```
+
+## Summary of Error Measures
+```{r}
+mAPE <- c(MAPE_OLS, MAPE_FE, MAPE_PPML, MAPE_NBPML, MAPE_GAUSSIAN) 
+medianAPE <- c(MedianAPE_OLS, MedianAPE_FE, MedianAPE_PPML, MedianAPE_NBPML, MedianAPE_GAUSSIAN)
+mAE <- c(MAE_OLS, MAE_FE, MAE_PPML, MAE_NBPML, MAE_GAUSSIAN)
+medianAE <- c(MedianAE_OLS, MedianAE_FE, MedianAE_PPML, MedianAE_NBPML, MedianAE_GAUSSIAN)
+rMSE <- c(RMSE_OLS, RMSE_FE, RMSE_PPML, RMSE_NBPML, RMSE_GAUSSIAN)
+
+Error_Measures <- data.frame(mAPE, medianAPE, mAE, medianAE, rMSE, 
+                             row.names = c("OLS", "FE", "PPML", "NBPML", "GAUSSIAN"))
+Error_Measures
+```
+
+### Residual Plot
+```{r}
+w <- data.frame(x = log(PPML$fitted.values), 
+                y = log(market$passengers) - log(PPML$fitted.values))
+names(w) <- c("PredictedlnPAX", "Residuals")
+
+ggplot(data=w,aes(x = PredictedlnPAX, y = Residuals)) + 
+  geom_point()
+```
+
+It is a residual plot of ppml estimator. Both residuals and predicted values are in log scale. It appears that residuals are biased and they exhibit heteroscedasticity.
+
+### Kernel
+```{r message = FALSE, warning = FALSE}
+q = data.frame(market$passengers, exp(OLS$fitted.values), 
+               exp(FE$fitted.values), PPML$fitted.values,
+               NBPML$fitted.values, GAUSSIAN$fitted.values) 
+names(q) <- c("Observed","OLS", "FE", "PPML", "NBPML", "GAUSSIAN")
+q.m <- melt(log(q))
+names(q.m) <- c("Model", "lnPAX")
+ggplot(q.m) +
+  geom_density(aes(x = lnPAX, colour = Model)) +
+  xlim(4,14) 
+```
+
+To have an understanding of bias, variance, skewness and kurtosis of distributions of the predicted values of estimators, the graphs of the univariate kernel density estimations are examined here. It is hard to see the difference in the distributions of estimators visually (except for GAUSSIAN whose distribution is totally different) but we can make a table with moments of each distribution to compare their shape more precisely.
+
+### Moments
+#### D'Agostino skewness test (sampled 46340 because that is max sample size the test allows)
+```{r}
+agostino.test(sample(log(market$passengers), 46340))
+```
+
+We reject the null hypothesis which means the data has skewness.
+
+#### Anscombe-Glynn test of kurtosis
+```{r}
+anscombe.test(log(market$passengers))
+```
+
+We reject the null hypothesis which means the data has kurtosis.
+
+#### Jarque-Bera test for normality
+```{r}
+jarque.test(log(market$passengers))
+```
+
+We reject the null hypothesis which means that the data does not come from a normal distribution.
+
+#### Moments of each distribution
+```{r warning = FALSE, message = FALSE}
+# fitted values of each estimator in log scale
+fitted_values <- data.frame(log(market$passengers),
+                            OLS$fitted.values,
+                            FE$fitted.values,
+                            log(PPML$fitted.values),
+                            log(NBPML$fitted.values),
+                            log(GAUSSIAN$fitted.values))
+
+# names of estimators
+names(fitted_values) <- c("Observed", "OLS", "FE", "PPML", "NBPML", "GAUSSIAN")
+
+# Moments
+Mean <- map(fitted_values, mean) %>% as.numeric()
+Var <- map(fitted_values, var) %>% as.numeric()
+Skewness <- map(fitted_values, skewness) %>% as.numeric()
+Kurtosis <- map(fitted_values, kurtosis) %>% as.numeric()
+
+# Put everything together
+moments <- data.frame(Mean, Var, Skewness, Kurtosis, 
+                      row.names = c("Observed", "OLS", "FE", "PPML", "NBPML", "GAUSSIAN"))
+
+moments
+```
+
+I do not know why we got NaN for GAUSSIAN. 
+
+### Predicted vs Observed plot
+```{r warning = FALSE, message = FALSE}
+r = data.frame(market$passengers, exp(OLS$fitted.values), 
+               exp(FE$fitted.values), PPML$fitted.values, 
+               NBPML$fitted.values, GAUSSIAN$fitted.values)
+names(r) <- c("Observed","OLS", "FE", "PPML", "NBPML", "GAUSSIAN")
+r.m <- log(r) %>% melt(id.vars = "Observed", measure.vars = c("OLS", "FE", "PPML",
+                                                              "NBPML", "GAUSSIAN"))
+names(r.m) <- c("Observed", "Model", "Predicted")
+ggplot(r.m, aes(Observed, Predicted, colour = factor(Model))) +
+  geom_point() + 
+  geom_smooth(method=lm, se=FALSE, color="black") + 
+  facet_wrap(~ Model, ncol = 1, scales = "fixed") +
+  guides(colour = "none") +
+  theme()
+```
+
+### Spot Analysis
+```{r warning = FALSE, message = FALSE}
+new.df <- market %>% filter(origin == "Atlanta")
+predicted <- predict(PPML, new.df)
+example <- cbind(new.df[,c("year", "destination", "passengers")], predicted, new.df[,c("capacity")])
+names(example) <- c("Year", "Destination", "Observed", "Predicted", "Capacity")
+example <- example %>% arrange(Year, Destination)
+example$Predicted <- example$Predicted %>% as.integer()
+head(example, 30)
+```
